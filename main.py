@@ -346,22 +346,44 @@ class Main(star.Star):
 						continue
 				info = await self._napcat_get_login_info(base_url, credential_cache, allow_insecure)
 				if not info:
-					# 可能 Credential 过期或连接失败
-					self._napcat_fail_count += 1
-					if self._napcat_fail_count >= fail_threshold:
-						# 达到失败阈值，判定为离线
-						now_ts = time.time()
-						self._napcat_last_checked_ts = now_ts
-						if (self._napcat_last_status is True):
-							if not (cooldown_min > 0 and self._napcat_last_alert_ts and (now_ts - self._napcat_last_alert_ts) < cooldown_min * 60):
-								await self._napcat_send_offline_alert(base_url, uin, False)
-								self._napcat_last_alert_ts = now_ts
-						self._napcat_last_status = False
-						logger.warning("[email_tool] Napcat 获取登录信息连续失败，暂时判定为离线。")
-					# 清空凭据尝试重登
-					credential_cache = None
-					await asyncio.sleep(max(10, interval))
-					continue
+					# 先尝试重新登录刷新 Credential（避免因 Credential 过期误报离线）
+					logger.info("[email_tool] GetQQLoginInfo 失败，尝试刷新 Credential...")
+					new_cred = await self._napcat_login(base_url, token, allow_insecure)
+					if new_cred:
+						credential_cache = new_cred
+						info = await self._napcat_get_login_info(base_url, credential_cache, allow_insecure)
+						if info and isinstance(info, dict):
+							logger.info("[email_tool] Credential 刷新成功，恢复正常。")
+							# 继续走下面的 online 判断
+						else:
+							# 刷新后仍然失败
+							self._napcat_fail_count += 1
+							if self._napcat_fail_count >= fail_threshold:
+								now_ts = time.time()
+								self._napcat_last_checked_ts = now_ts
+								if (self._napcat_last_status is True):
+									if not (cooldown_min > 0 and self._napcat_last_alert_ts and (now_ts - self._napcat_last_alert_ts) < cooldown_min * 60):
+										await self._napcat_send_offline_alert(base_url, uin, False)
+										self._napcat_last_alert_ts = now_ts
+								self._napcat_last_status = False
+								logger.warning("[email_tool] Napcat 含凭证刷新重试后仍失败，判定为离线。")
+							credential_cache = None
+							await asyncio.sleep(max(10, interval))
+							continue
+					else:
+						self._napcat_fail_count += 1
+						if self._napcat_fail_count >= fail_threshold:
+							now_ts = time.time()
+							self._napcat_last_checked_ts = now_ts
+							if (self._napcat_last_status is True):
+								if not (cooldown_min > 0 and self._napcat_last_alert_ts and (now_ts - self._napcat_last_alert_ts) < cooldown_min * 60):
+									await self._napcat_send_offline_alert(base_url, uin, False)
+									self._napcat_last_alert_ts = now_ts
+							self._napcat_last_status = False
+							logger.warning("[email_tool] Napcat 登录与查询均连续失败，已判定为离线。")
+						credential_cache = None
+						await asyncio.sleep(max(10, interval))
+						continue
 				# 解析 online 字段
 				online = None
 				try:
@@ -373,19 +395,61 @@ class Main(star.Star):
 				except Exception:
 					pass
 				if online is None:
-					logger.error(f"[email_tool] Napcat 登录信息无法解析：{json.dumps(info, ensure_ascii=False)}")
-					self._napcat_fail_count += 1
-					if self._napcat_fail_count >= fail_threshold:
-						now_ts = time.time()
-						self._napcat_last_checked_ts = now_ts
-						if (self._napcat_last_status is True):
-							if not (cooldown_min > 0 and self._napcat_last_alert_ts and (now_ts - self._napcat_last_alert_ts) < cooldown_min * 60):
-								await self._napcat_send_offline_alert(base_url, uin, False)
-								self._napcat_last_alert_ts = now_ts
-						self._napcat_last_status = False
-						logger.warning("[email_tool] Napcat 数据解析失败次数达阈值，暂时判定为离线。")
-					await asyncio.sleep(max(10, interval))
-					continue
+					# 可能 Credential 过期导致 Unauthorized，先尝试刷新
+					logger.info(f"[email_tool] 解析 online 失败: {json.dumps(info, ensure_ascii=False)[:200]}，尝试刷新 Credential...")
+					new_cred = await self._napcat_login(base_url, token, allow_insecure)
+					if new_cred:
+						credential_cache = new_cred
+						retry_info = await self._napcat_get_login_info(base_url, credential_cache, allow_insecure)
+						if retry_info and isinstance(retry_info, dict):
+							# 在 retry_info 里尝试解析 online
+							if isinstance(retry_info.get("data"), dict) and "online" in retry_info["data"]:
+								online = bool(retry_info["data"]["online"])
+							elif "online" in retry_info:
+								online = bool(retry_info["online"])
+							if online is not None:
+								logger.info("[email_tool] Credential 刷新成功，恢复正常。")
+								# 继续走下面的 online 状态判断
+							else:
+								# 刷新后 online 仍然 None
+								self._napcat_fail_count += 1
+								if self._napcat_fail_count >= fail_threshold:
+									now_ts = time.time()
+									self._napcat_last_checked_ts = now_ts
+									if (self._napcat_last_status is True):
+										if not (cooldown_min > 0 and self._napcat_last_alert_ts and (now_ts - self._napcat_last_alert_ts) < cooldown_min * 60):
+											await self._napcat_send_offline_alert(base_url, uin, False)
+											self._napcat_last_alert_ts = now_ts
+									self._napcat_last_status = False
+									logger.warning("[email_tool] Napcat 凭证刷新后仍无法解析，判定为离线。")
+								await asyncio.sleep(max(10, interval))
+								continue
+						else:
+							self._napcat_fail_count += 1
+							if self._napcat_fail_count >= fail_threshold:
+								now_ts = time.time()
+								self._napcat_last_checked_ts = now_ts
+								if (self._napcat_last_status is True):
+									if not (cooldown_min > 0 and self._napcat_last_alert_ts and (now_ts - self._napcat_last_alert_ts) < cooldown_min * 60):
+										await self._napcat_send_offline_alert(base_url, uin, False)
+										self._napcat_last_alert_ts = now_ts
+								self._napcat_last_status = False
+								logger.warning("[email_tool] Napcat 凭证刷新后查询仍失败，判定为离线。")
+							await asyncio.sleep(max(10, interval))
+							continue
+					else:
+						self._napcat_fail_count += 1
+						if self._napcat_fail_count >= fail_threshold:
+							now_ts = time.time()
+							self._napcat_last_checked_ts = now_ts
+							if (self._napcat_last_status is True):
+								if not (cooldown_min > 0 and self._napcat_last_alert_ts and (now_ts - self._napcat_last_alert_ts) < cooldown_min * 60):
+									await self._napcat_send_offline_alert(base_url, uin, False)
+									self._napcat_last_alert_ts = now_ts
+							self._napcat_last_status = False
+							logger.warning("[email_tool] Napcat 登录失败，无法刷新凭证，判定为离线。")
+						await asyncio.sleep(max(10, interval))
+						continue
 
 				# 状态变更：Online -> Offline 触发警报；冷却控制
 				now_ts = time.time()
