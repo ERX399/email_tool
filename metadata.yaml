@@ -1,6 +1,7 @@
-name: astrbot_plugin_email_tool
+name: 399_email_tool
+display_name: 邮箱工具
 desc: 一个能让AI自主决定SMTP发送邮件的函数工具，支持服务器内存告警和NapCat下线告警。
 help: 提供调用SMTP邮件服务的函数工具，支持服务器内存告警和NapCat下线告警。
 version: v1.1.0
 author: Chris
-repo: https://github.com/Chris95743/astrbot_plugin_email_tool
+repo: https://github.com/ERX399/email_tool
